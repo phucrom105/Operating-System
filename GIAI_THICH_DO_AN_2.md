@@ -307,10 +307,10 @@ vmprintlevel(pagetable, level):
     for i = 0 to 511:
         pte = pagetable[i]
         if pte & PTE_V == 0: bỏ qua (entry không hợp lệ)
-        
+
         in indent (3-level) cặp ".."
         in "i: pte <pte_value> pa <physical_addr>"
-        
+
         if level > 0 AND (pte & (PTE_R|PTE_W|PTE_X)) == 0:
             // Non-leaf: đệ quy xuống cấp thấp hơn
             pa = PTE2PA(pte)
@@ -388,7 +388,7 @@ vmprint(pagetable_t pagetable)
 ### 3.6 Vị trí gọi vmprint trong exec.c
 
 ```c
-// Trong kernel/exec.c, cuối hàm kexec():
+// Trong kernel/exec.c, cuối hàm exec():
 
   // Commit to the user image.
   oldpagetable = p->pagetable;
@@ -440,9 +440,7 @@ page table 0x0000000087f6b000    ← physical addr của root L2 table
   → Chứa TRAMPOLINE, TRAPFRAME, USYSCALL
 
 .. .. ..511: pte 0x0000000021fdd007 pa 0x0000000087f74000
-  → 0x07 = 0000_0111 → V=1, R=1, W=1, X=0, U=1
-  → Có thể là TRAPFRAME (read+write, không execute, user... thực ra không có U)
-  → 0x07 = V=1, R=1, W=1, X=0, U=0 → kernel only → đây là TRAPFRAME
+  → 0x07 = 0000_0111 → V=1, R=1, W=1, X=0, U=0 → kernel only → đây là TRAPFRAME
 
 .. .. ..509: pte 0x0000000021fdcc13 pa 0x0000000087f73000
   → 0x13 = 0001_0011 → V=1, R=1, W=0, X=0, U=1
@@ -711,45 +709,276 @@ struct inode {
 
 ## 5. Câu Hỏi Vấn Đáp Thường Gặp
 
-### Task 1
+### 5.1 Task 2 — Page Table: Cấu trúc và in ấn
 
-**Q: Tại sao gọi là "speed up system calls"? Nhanh hơn bao nhiêu?**
-A: Vì user đọc trực tiếp từ memory, không cần `ecall` instruction, không cần context switch user→kernel→user. Tiết kiệm được hàng trăm đến hàng nghìn CPU cycles. Linux dùng cơ chế tương tự gọi là VDSO (Virtual Dynamic Shared Object).
+---
 
-**Q: Nếu process fork(), pid của child có được update trong usyscall page không?**
-A: Có. Trong `allocproc()`, mỗi process (kể cả child của fork) đều được cấp phát usyscall page mới và ghi `p->usyscall->pid = p->pid`. Child có pid khác parent nên có page riêng với pid đúng.
+**Q: Một page table có bao nhiêu entry? Tại sao là 512?**
 
-**Q: Physical page của USYSCALL có bị copy khi fork() không?**
-A: Không. USYSCALL nằm ở địa chỉ cao (gần TRAPFRAME), không nằm trong vùng `[0, p->sz)` mà `uvmcopy()` sao chép. Child được cấp phát page USYSCALL mới trong `allocproc()`.
+A: Mỗi page table có đúng **512 entry** (0 đến 511). Lý do:
+- Sv39 dùng **9 bit** cho mỗi cấp index (VPN[2], VPN[1], VPN[0])
+- 2⁹ = **512** → mỗi bảng có tối đa 512 entry
+- Mỗi entry (PTE) là 8 byte → 512 × 8 = **4096 byte = 1 trang (PGSIZE)**
+- Vì vậy mỗi page table vừa khít một trang vật lý — rất gọn và tiện quản lý
 
-**Q: Điều gì xảy ra nếu quên `uvmunmap(USYSCALL)` trong `proc_freepagetable()`?**
-A: Khi `uvmfree()` gọi `freewalk()` để giải phóng page table, `freewalk()` thấy PTE của USYSCALL vẫn valid (V=1) nhưng không phải non-leaf (có R bit) → gọi `panic("freewalk: leaf")` → kernel crash.
+---
 
-### Task 2
+**Q: Ý nghĩa của các entry ở mỗi level là gì?**
 
-**Q: Hàm `freewalk()` trong vm.c có tương tự `vmprint()` không?**
-A: Có cùng ý tưởng duyệt đệ quy page table, nhưng mục đích khác: `freewalk()` giải phóng bộ nhớ, `vmprint()` chỉ in ra.
+A: Ba level có vai trò khác nhau trong quá trình dịch địa chỉ:
 
-**Q: Làm sao phân biệt non-leaf và leaf PTE?**
-A: Theo RISC-V spec: nếu PTE có R=W=X=0 (cả ba đều 0) thì là non-leaf (trỏ đến page table cấp thấp hơn). Nếu có ít nhất một trong ba = 1 thì là leaf (trỏ đến physical page thật).
+| Level | Tên | Index từ VA | Entry trỏ đến |
+|-------|-----|-------------|----------------|
+| L2 (root) | Page Global Directory | VPN[2] (bit 38–30) | L1 page table |
+| L1 | Page Middle Directory | VPN[1] (bit 29–21) | L0 page table |
+| L0 (leaf) | Page Table | VPN[0] (bit 20–12) | Physical page (dữ liệu thật) |
 
-**Q: Tại sao `%p` mà không dùng `%x` hay `%lx` để in PTE và PA?**
-A: `%p` in đủ 64-bit hex với prefix `0x`, đảm bảo đúng format yêu cầu của bài. `%x` có thể in thiếu bit trên 32-bit.
+- Entry L2 và L1 là **non-leaf**: R=W=X=0, chỉ trỏ đến page table cấp thấp hơn
+- Entry L0 là **leaf**: có ít nhất R hoặc W hoặc X=1, trỏ thẳng đến dữ liệu
 
-### Task 3
+---
+
+**Q: Khi nào thì dừng đệ quy?**
+
+A: Dừng khi gặp một trong hai trường hợp:
+1. **Entry không hợp lệ**: `PTE_V = 0` → bỏ qua, không in, không đệ quy
+2. **Đã đến leaf (L0)**: `level == 0` → in entry nhưng không đệ quy xuống nữa, hoặc khi entry hiện tại có ít nhất một bit R/W/X = 1 (là leaf PTE) dù chưa đến level 0
+
+Trong code:
+```c
+if(level > 0 && (pte & (PTE_R|PTE_W|PTE_X)) == 0){
+    vmprintlevel((pagetable_t)pa, level - 1);  // chỉ đệ quy khi non-leaf
+}
+// Nếu level == 0 hoặc là leaf → không đệ quy, dừng ở đây
+```
+
+---
+
+**Q: Mỗi bảng có 512 entry nhưng output chỉ in vài dòng — những chỗ nào bị bỏ qua?**
+
+A: Chỉ in các entry có **PTE_V = 1** (hợp lệ). Phần lớn 512 entry ở mỗi cấp đều là 0 (chưa được map) → bỏ qua hoàn toàn.
+
+**Giải thích output mẫu:**
+```
+..0:    → L2 entry 0  (được dùng — vùng địa chỉ thấp: code, data, stack)
+..255:  → L2 entry 255 (được dùng — vùng địa chỉ cao: TRAMPOLINE, TRAPFRAME, USYSCALL)
+        → Entries 1..254 và 256..511: đều = 0, PTE_V=0 → BỎ QUA hết
+```
+
+**Tại sao entry 0 và 255?**
+- Entry 0 (VPN[2]=0): địa chỉ thấp `0x0000_0000` → chứa user code/data/stack
+- Entry 255 (VPN[2]=255): địa chỉ `0xFF << 30 ≈ 0x3FC0_0000_0000` → gần MAXVA → chứa TRAMPOLINE, TRAPFRAME, USYSCALL
+
+```c
+// Code bỏ qua entry không hợp lệ:
+if(!(pte & PTE_V))
+    continue;   // ← entry = 0, bỏ qua, không in
+```
+
+---
+
+### 5.2 Task 1 — Speed up: Định nghĩa hàm và luồng gọi
+
+---
+
+**Q: Hàm `ugetpid()` được gọi từ user space — nó được định nghĩa ở đâu?**
+
+A: `ugetpid()` được định nghĩa trực tiếp trong **`user/pgtbltest.c`** (file test của Task 1):
+
+```c
+// user/pgtbltest.c
+int
+ugetpid(void)
+{
+  struct usyscall *u = (struct usyscall *)USYSCALL;
+  return u->pid;
+}
+```
+
+Đây **không phải** là syscall thông thường và **không** đi qua `user/usys.pl` hay `user/ulib.c`. Nó chỉ là một hàm C bình thường trong file test, đọc trực tiếp địa chỉ virtual `USYSCALL`.
+
+> **Phân biệt với syscall thông thường:**
+> - Syscall thông thường (vd `getpid()`): được khai báo trong `user/user.h`, stub được gen bởi `user/usys.pl`, thực thi `ecall` để trap vào kernel
+> - `ugetpid()`: chỉ là hàm C thường, không có `ecall`, không trap — chỉ đọc memory
+
+---
+
+**Q: Luồng hoạt động khi chạy `pgtbltest` là gì?**
+
+A: Luồng từ lúc gõ lệnh đến khi in kết quả:
+
+```
+1. Shell gọi fork() + exec("pgtbltest")
+        │
+        ▼
+2. exec() gọi allocproc() (nếu là process mới)
+   → kalloc() cấp phát physical page cho usyscall
+   → p->usyscall->pid = p->pid  ← ghi pid vào shared page
+
+3. proc_pagetable() map USYSCALL → physical page
+   với quyền PTE_R | PTE_U
+
+4. main() trong pgtbltest.c chạy → gọi ugetpid_test()
+
+5. ugetpid_test() fork() 64 child process
+   → mỗi child: allocproc() chạy lại → có usyscall page riêng với pid đúng
+
+6. Trong mỗi child:
+   ugetpid() → đọc *(struct usyscall*)USYSCALL → lấy pid
+   getpid()  → gọi syscall → kernel trả p->pid
+   So sánh hai giá trị → phải bằng nhau
+
+7. Nếu khớp → exit(0) → parent wait() nhận status=0 → OK
+   Nếu không khớp → in FAILED → exit(1)
+```
+
+---
+
+**Q: Khi xem code `ugetpid()`, giải thích từng dòng:**
+
+```c
+int ugetpid(void)
+{
+  struct usyscall *u = (struct usyscall *)USYSCALL;
+  return u->pid;
+}
+```
+
+**Dòng 1:** Cast địa chỉ virtual `USYSCALL` (một hằng số số nguyên được định nghĩa trong `memlayout.h`) thành pointer kiểu `struct usyscall *`. Từ đó `u` trỏ đến vùng shared memory trong user VA space.
+
+**Dòng 2:** Đọc field `pid` từ struct → CPU sinh ra lệnh load bộ nhớ → MMU dùng user page table dịch địa chỉ → PTE_V=1, PTE_R=1, PTE_U=1 → hợp lệ → đọc được giá trị pid kernel đã ghi trước đó. Không có `ecall`, không có trap.
+
+---
+
+### 5.3 Task 1 — Chạy chương trình → Luồng hoạt động → Code
+
+---
+
+**Q: Chạy `pgtbltest` trong xv6, điều gì xảy ra đầu tiên?**
+
+A: Shell nhận lệnh → gọi `fork()` tạo child → child gọi `exec("pgtbltest", ...)`.
+
+Trong `exec()`:
+1. Load ELF binary của `pgtbltest` vào bộ nhớ
+2. Tạo page table mới cho process
+3. `proc_pagetable()` map TRAMPOLINE, TRAPFRAME, và **USYSCALL** (Task 1)
+4. Sau khi exec xong, process bắt đầu tại `main()` của `pgtbltest`
+
+---
+
+**Q: Làm sao kernel đảm bảo `pid` trong USYSCALL luôn đúng?**
+
+A: Kernel ghi `p->usyscall->pid = p->pid` tại **hai thời điểm**:
+1. Trong `allocproc()` khi tạo process mới
+2. Sau `fork()`, child được `allocproc()` gọi lại với `pid` mới → shared page mới → `pid` được ghi đúng cho child
+
+Child **không dùng chung** physical page USYSCALL với parent — mỗi process có physical page riêng, được cấp phát bởi `kalloc()` trong `allocproc()`.
+
+---
+
+**Q: Nếu xem code `proc_pagetable()`, giải thích tại sao error path không gọi `uvmunmap(USYSCALL)`?**
+
+```c
+if(mappages(pagetable, USYSCALL, PGSIZE,
+            (uint64)(p->usyscall), PTE_R | PTE_U) < 0){
+  uvmunmap(pagetable, TRAMPOLINE, 1, 0);
+  uvmunmap(pagetable, TRAPFRAME, 1, 0);
+  // KHÔNG có uvmunmap(USYSCALL) ở đây!
+  uvmfree(pagetable, 0);
+  return 0;
+}
+```
+
+A: Vì error path này được thực thi khi `mappages(USYSCALL, ...)` **thất bại** — nghĩa là USYSCALL **chưa được map** vào page table. Nếu gọi `uvmunmap(USYSCALL)` lúc này thì cố unmap một trang chưa tồn tại → kernel panic. Ngược lại, TRAMPOLINE và TRAPFRAME đã được map thành công trước đó nên cần unmap chúng trước khi giải phóng page table.
+
+---
+
+### 5.4 Task 2 — Luồng hoạt động → Code
+
+---
+
+**Q: Khi boot xv6, vmprint() được gọi như thế nào?**
+
+A: Luồng đầy đủ:
+```
+kernel main()
+    → userinit()          ← tạo process pid=1 (init)
+    → scheduler()         ← bắt đầu chạy process
+    → process pid=1 chạy → exec("/init")
+    → exec() trong kernel
+        → load ELF /init
+        → build page table
+        → if(p->pid == 1) vmprint(p->pagetable)  ← IN RA ĐÂY
+        → return argc
+    → init bắt đầu chạy → khởi động shell
+```
+
+Output xuất hiện **một lần duy nhất** khi boot, trước `init: starting sh`.
+
+---
+
+**Q: Giải thích logic tính `depth` trong `vmprintlevel()`:**
+
+```c
+int depth = 3 - level;
+for(int d = 0; d < depth; d++){
+    printf("..");
+    if(d < depth - 1) printf(" ");
+}
+```
+
+A: Bảng ánh xạ level → depth → số cặp `..`:
+
+| level | depth = 3-level | Số cặp `..` | Output |
+|-------|-----------------|------------|--------|
+| 2 (root L2) | 1 | 1 | `..` |
+| 1 (L1) | 2 | 2 | `.. ..` |
+| 0 (leaf L0) | 3 | 3 | `.. .. ..` |
+
+Space được in **giữa** các cặp (`d < depth - 1`), không in sau cặp cuối. Kết quả: `.. ..` (2 cặp) và `.. .. ..` (3 cặp) có dấu cách đúng format mẫu.
+
+---
+
+### 5.5 Task 3 — Câu hỏi thường gặp
+
+---
 
 **Q: Tại sao NDIRECT giảm từ 12 xuống 11?**
-A: Inode có mảng `addrs[]` cố định 13 phần tử (không thể thay đổi kích thước on-disk inode). Cần dùng 1 slot cho singly-indirect (addrs[11]) và 1 slot cho doubly-indirect (addrs[12]), nên direct chỉ còn 11.
+
+A: Inode có mảng `addrs[]` cố định **13 phần tử** (không thể thay đổi kích thước on-disk inode). Cần dùng:
+- 1 slot cho singly-indirect (`addrs[11]`)
+- 1 slot cho doubly-indirect (`addrs[12]`)
+
+→ Direct chỉ còn `addrs[0..10]` = 11 phần tử.
+
+---
 
 **Q: Tại sao phải `brelse()` trước khi gọi `bread()` tiếp theo trong bmap()?**
+
 A: Buffer cache có số lượng buffer giới hạn (`NBUF`). `bread()` giữ buffer lock (pin buffer). Nếu không `brelse()` buffer đầu tiên trước khi `bread()` buffer thứ hai, có thể gây cạn kiệt buffer cache, dẫn đến deadlock.
 
+---
+
 **Q: `log_write()` và `bwrite()` khác nhau thế nào?**
+
 A: `bwrite()` ghi thẳng ra đĩa (không an toàn nếu crash giữa chừng). `log_write()` ghi vào log trước, đến khi `end_op()`/`commit()` mới ghi ra đĩa thật — đảm bảo atomicity (all-or-nothing).
 
+---
+
 **Q: MAXFILE = 65803 tính như thế nào?**
+
 A: 11 (direct) + 256 (singly-indirect, 1 block × 256 entries) + 256×256 (doubly-indirect, 256 blocks × 256 entries) = 11 + 256 + 65536 = **65803**.
 
 ---
 
-*Tài liệu được tạo cho Project 2 — Operating Systems, xv6 RISC-V.*
+**Q: Tại sao phải `make clean` khi thay đổi NDIRECT?**
+
+A: `NDIRECT` ảnh hưởng đến kích thước `struct dinode` được ghi ra file `fs.img` bởi chương trình `mkfs`. Nếu không `make clean`, file `fs.img` cũ vẫn dùng format cũ (NDIRECT=12) trong khi kernel mới đọc theo format mới (NDIRECT=11) → offset sai → corruption → kernel panic.
+
+---
+
+**Q: Tại sao `itrunc()` phải giải phóng từ lá lên gốc?**
+
+A: Vì địa chỉ của block con được lưu **bên trong block cha**. Nếu free block cha trước → mất địa chỉ block con → không thể tìm và free block con → disk leak (block con không bao giờ được trả về free list, gian lận disk forever).
+
+---
