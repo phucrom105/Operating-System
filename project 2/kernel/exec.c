@@ -135,6 +135,10 @@ kexec(char *path, char **argv)
   p->trapframe->sp = sp; // initial stack pointer
   proc_freepagetable(oldpagetable, oldsz);
 
+  // Task 2: Print page table for the first process (pid == 1) only.
+  if(p->pid == 1)
+    vmprint(p->pagetable);
+
   return argc; // this ends up in a0, the first argument to main(argc, argv)
 
  bad:

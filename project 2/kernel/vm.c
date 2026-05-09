@@ -484,3 +484,44 @@ ismapped(pagetable_t pagetable, uint64 va)
   }
   return 0;
 }
+
+// ============================================================
+// Task 2: Print page table
+// ============================================================
+ 
+// Helper: recursively print one level of the page table.
+// level: 2 = L2 (root), 1 = L1, 0 = L0 (leaf)
+// indent: number of ".." pairs to print before each entry
+static void
+vmprintlevel(pagetable_t pagetable, int level)
+{
+  for(int i = 0; i < 512; i++){
+    pte_t pte = pagetable[i];
+    if(pte & PTE_V){
+      // Print the correct number of ".." for this level.
+      // level 2 -> 1 pair, level 1 -> 2 pairs, level 0 -> 3 pairs
+      int depth = 3 - level;  // level2=1 dot, level1=2 dots, level0=3 dots
+      for(int d = 0; d < depth; d++){
+        printf("..");
+        if(d < depth - 1)
+          printf(" ");
+      }
+      uint64 pa = PTE2PA(pte);
+      printf("%d: pte %p pa %p\n", i, (void*)pte, (void*)pa);
+      // If this is a non-leaf (no R/W/X bits), recurse into next level.
+      if(level > 0 && (pte & (PTE_R|PTE_W|PTE_X)) == 0){
+        vmprintlevel((pagetable_t)pa, level - 1);
+      }
+    }
+  }
+}
+ 
+// Print the page table rooted at pagetable.
+// Called for process with pid==1 from exec().
+void
+vmprint(pagetable_t pagetable)
+{
+  printf("page table %p\n", (void*)pagetable);
+  vmprintlevel(pagetable, 2);
+}
+ 
